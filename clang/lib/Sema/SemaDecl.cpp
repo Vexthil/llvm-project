@@ -7557,6 +7557,19 @@ NamedDecl *Sema::getShadowedDeclaration(const TypedefNameDecl *D,
   return isa<TypedefNameDecl>(ShadowedDecl) ? ShadowedDecl : nullptr;
 }
 
+/// Return the declaration shadowed by the given variable \p D, or null
+/// if it doesn't shadow any declaration or shadowing warnings are disabled.
+NamedDecl *Sema::getShadowedDeclaration(const BindingDecl *D,
+                                        const LookupResult &R) {
+  if (!shouldWarnIfShadowedDecl(Diags, R))
+    return nullptr;
+
+  NamedDecl *ShadowedDecl = R.getFoundDecl();
+  return isa<VarDecl>(ShadowedDecl) || isa<FieldDecl>(ShadowedDecl)
+             ? ShadowedDecl
+             : nullptr;
+}
+
 /// Diagnose variable or built-in function shadowing.  Implements
 /// -Wshadow.
 ///
