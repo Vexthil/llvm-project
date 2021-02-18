@@ -17,6 +17,9 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "llvm/ADT/SmallVector.h"
 
+#define GET_TYPEDEF_CLASSES
+#include "flang/Optimizer/Dialect/FIROpsTypes.h.inc"
+
 namespace llvm {
 class raw_ostream;
 class StringRef;
@@ -39,12 +42,6 @@ class FIROpsDialect;
 using KindTy = unsigned;
 
 namespace detail {
-struct BoxTypeStorage;
-struct BoxCharTypeStorage;
-struct BoxProcTypeStorage;
-struct CharacterTypeStorage;
-struct ComplexTypeStorage;
-struct FieldTypeStorage;
 struct HeapTypeStorage;
 struct IntegerTypeStorage;
 struct LenTypeStorage;
@@ -54,6 +51,7 @@ struct RealTypeStorage;
 struct RecordTypeStorage;
 struct ReferenceTypeStorage;
 struct SequenceTypeStorage;
+struct SliceTypeStorage;
 struct TypeDescTypeStorage;
 struct VectorTypeStorage;
 } // namespace detail
@@ -96,33 +94,6 @@ mlir::Type dyn_cast_ptrEleTy(mlir::Type t);
 
 // Intrinsic types
 
-/// Model of the Fortran CHARACTER intrinsic type, including the KIND type
-/// parameter. The model does not include a LEN type parameter. A CharacterType
-/// is thus the type of a single character value.
-class CharacterType
-    : public mlir::Type::TypeBase<CharacterType, mlir::Type,
-                                  detail::CharacterTypeStorage> {
-public:
-  using Base::Base;
-  static CharacterType get(mlir::MLIRContext *ctxt, KindTy kind);
-  KindTy getFKind() const;
-};
-
-/// Model of a Fortran COMPLEX intrinsic type, including the KIND type
-/// parameter. COMPLEX is a floating point type with a real and imaginary
-/// member.
-class ComplexType : public mlir::Type::TypeBase<fir::ComplexType, mlir::Type,
-                                                detail::ComplexTypeStorage> {
-public:
-  using Base::Base;
-  static fir::ComplexType get(mlir::MLIRContext *ctxt, KindTy kind);
-
-  /// Get the corresponding fir.real<k> type.
-  mlir::Type getElementType() const;
-
-  KindTy getFKind() const;
-};
-
 /// Model of a Fortran INTEGER intrinsic type, including the KIND type
 /// parameter.
 class IntegerType : public mlir::Type::TypeBase<fir::IntegerType, mlir::Type,
@@ -155,56 +126,15 @@ public:
 
 // FIR support types
 
-/// The type of a Fortran descriptor. Descriptors are tuples of information that
-/// describe an entity being passed from a calling context. This information
-/// might include (but is not limited to) whether the entity is an array, its
-/// size, or what type it has.
-class BoxType
-    : public mlir::Type::TypeBase<BoxType, mlir::Type, detail::BoxTypeStorage> {
+/// Type of a vector that represents an array slice operation on an array.
+/// Fortran slices are triples of lower bound, upper bound, and stride. The rank
+/// of a SliceType must be at least 1.
+class SliceType : public mlir::Type::TypeBase<SliceType, mlir::Type,
+                                              detail::SliceTypeStorage> {
 public:
   using Base::Base;
-  static BoxType get(mlir::Type eleTy, mlir::AffineMapAttr map = {});
-  mlir::Type getEleTy() const;
-  mlir::AffineMapAttr getLayoutMap() const;
-
-  static mlir::LogicalResult
-  verifyConstructionInvariants(mlir::Location, mlir::Type eleTy,
-                               mlir::AffineMapAttr map);
-};
-
-/// The type of a pair that describes a CHARACTER variable. Specifically, a
-/// CHARACTER consists of a reference to a buffer (the string value) and a LEN
-/// type parameter (the runtime length of the buffer).
-class BoxCharType : public mlir::Type::TypeBase<BoxCharType, mlir::Type,
-                                                detail::BoxCharTypeStorage> {
-public:
-  using Base::Base;
-  static BoxCharType get(mlir::MLIRContext *ctxt, KindTy kind);
-  CharacterType getEleTy() const;
-};
-
-/// The type of a pair that describes a PROCEDURE reference. Pointers to
-/// internal procedures must carry an additional reference to the host's
-/// variables that are referenced.
-class BoxProcType : public mlir::Type::TypeBase<BoxProcType, mlir::Type,
-                                                detail::BoxProcTypeStorage> {
-public:
-  using Base::Base;
-  static BoxProcType get(mlir::Type eleTy);
-  mlir::Type getEleTy() const;
-
-  static mlir::LogicalResult verifyConstructionInvariants(mlir::Location,
-                                                          mlir::Type eleTy);
-};
-
-/// The type of a field name. Implementations may defer the layout of a Fortran
-/// derived type until runtime. This implies that the runtime must be able to
-/// determine the offset of fields within the entity.
-class FieldType : public mlir::Type::TypeBase<FieldType, mlir::Type,
-                                              detail::FieldTypeStorage> {
-public:
-  using Base::Base;
-  static FieldType get(mlir::MLIRContext *ctxt);
+  static SliceType get(mlir::MLIRContext *ctx, unsigned rank);
+  unsigned getRank() const;
 };
 
 /// The type of a heap pointer. Fortran entities with the ALLOCATABLE attribute
@@ -406,6 +336,17 @@ void verifyIntegralType(mlir::Type type);
 inline bool isa_complex(mlir::Type t) {
   return t.isa<fir::ComplexType>() || t.isa<mlir::ComplexType>();
 }
+
+inline bool isa_char_string(mlir::Type t) {
+  if (auto ct = t.dyn_cast_or_null<fir::CharacterType>())
+    return ct.getLen() != fir::CharacterType::singleton();
+  return false;
+}
+
+/// Is `t` a box type for which it is not possible to deduce the box size.
+/// It is not possible to deduce the size of a box that describes an entity
+/// of unknown rank or type.
+bool isa_unknown_size_box(mlir::Type t);
 
 } // namespace fir
 

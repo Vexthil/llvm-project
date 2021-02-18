@@ -584,6 +584,7 @@ public:
 protected:
   // Apply the implicit type rules to this symbol.
   void ApplyImplicitRules(Symbol &);
+  void AcquireIntrinsicProcedureFlags(Symbol &);
   const DeclTypeSpec *GetImplicitType(Symbol &, const Scope &);
   bool ConvertToObjectEntity(Symbol &);
   bool ConvertToProcEntity(Symbol &);
@@ -599,7 +600,26 @@ protected:
   bool inExecutionPart_{false};
   bool inSpecificationPart_{false};
   bool inEquivalenceStmt_{false};
-  std::set<SourceName> specPartForwardRefs_;
+
+  // Some information is collected from a specification part for deferred
+  // processing in DeclarationPartVisitor functions (e.g., CheckSaveStmts())
+  // that are called by ResolveNamesVisitor::FinishSpecificationPart().  Since
+  // specification parts can nest (e.g., INTERFACE bodies), the collected
+  // information that is not contained in the scope needs to be packaged
+  // and restorable.
+  struct SpecificationPartState {
+    std::set<SourceName> forwardRefs;
+    // Collect equivalence sets and process at end of specification part
+    std::vector<const std::list<parser::EquivalenceObject> *> equivalenceSets;
+    // Names of all common block objects in the scope
+    std::set<SourceName> commonBlockObjects;
+    // Info about about SAVE statements and attributes in current scope
+    struct {
+      std::optional<SourceName> saveAll; // "SAVE" without entity list
+      std::set<SourceName> entities; // names of entities with save attr
+      std::set<SourceName> commons; // names of common blocks with save attr
+    } saveInfo;
+  } specPartState_;
 
 private:
   Scope *currScope_{nullptr};
@@ -888,16 +908,6 @@ private:
     bool sequence{false}; // is a sequence type
     const Symbol *type{nullptr}; // derived type being defined
   } derivedTypeInfo_;
-  // Collect equivalence sets and process at end of specification part
-  std::vector<const std::list<parser::EquivalenceObject> *> equivalenceSets_;
-  // Names of all common block objects in the scope
-  std::set<SourceName> commonBlockObjects_;
-  // Info about about SAVE statements and attributes in current scope
-  struct {
-    std::optional<SourceName> saveAll; // "SAVE" without entity list
-    std::set<SourceName> entities; // names of entities with save attr
-    std::set<SourceName> commons; // names of common blocks with save attr
-  } saveInfo_;
   // In a ProcedureDeclarationStmt or ProcComponentDefStmt, this is
   // the interface name, if any.
   const parser::Name *interfaceName_{nullptr};
@@ -2137,7 +2147,7 @@ void ScopeHandler::ApplyImplicitRules(Symbol &symbol) {
       }
       if (IsIntrinsic(symbol.name(), functionOrSubroutineFlag)) {
         // type will be determined in expression semantics
-        symbol.attrs().set(Attr::INTRINSIC);
+        AcquireIntrinsicProcedureFlags(symbol);
         return;
       }
     }
@@ -2145,6 +2155,24 @@ void ScopeHandler::ApplyImplicitRules(Symbol &symbol) {
       Say(symbol.name(), "No explicit type declared for '%s'"_err_en_US);
       context().SetError(symbol);
     }
+  }
+}
+
+// Ensure that the symbol for an intrinsic procedure is marked with
+// the INTRINSIC attribute.  Also set PURE &/or ELEMENTAL as
+// appropriate.
+void ScopeHandler::AcquireIntrinsicProcedureFlags(Symbol &symbol) {
+  symbol.attrs().set(Attr::INTRINSIC);
+  switch (context().intrinsics().GetIntrinsicClass(symbol.name().ToString())) {
+  case evaluate::IntrinsicClass::elementalFunction:
+  case evaluate::IntrinsicClass::elementalSubroutine:
+    symbol.attrs().set(Attr::ELEMENTAL);
+    symbol.attrs().set(Attr::PURE);
+    break;
+  case evaluate::IntrinsicClass::impureSubroutine:
+    break;
+  default:
+    symbol.attrs().set(Attr::PURE);
   }
 }
 
@@ -2223,7 +2251,7 @@ void ScopeHandler::NotePossibleBadForwardRef(const parser::Name &name) {
               ? name.symbol->has<HostAssocDetails>()
               : name.symbol->owner().Contains(currScope())};
       if (isHostAssociated) {
-        specPartForwardRefs_.insert(name.source);
+        specPartState_.forwardRefs.insert(name.source);
       }
     }
   }
@@ -2231,8 +2259,8 @@ void ScopeHandler::NotePossibleBadForwardRef(const parser::Name &name) {
 
 std::optional<SourceName> ScopeHandler::HadForwardRef(
     const Symbol &symbol) const {
-  auto iter{specPartForwardRefs_.find(symbol.name())};
-  if (iter != specPartForwardRefs_.end()) {
+  auto iter{specPartState_.forwardRefs.find(symbol.name())};
+  if (iter != specPartState_.forwardRefs.end()) {
     return *iter;
   }
   return std::nullopt;
@@ -3452,14 +3480,23 @@ bool DeclarationVisitor::Pre(const parser::IntentStmt &x) {
 bool DeclarationVisitor::Pre(const parser::IntrinsicStmt &x) {
   HandleAttributeStmt(Attr::INTRINSIC, x.v);
   for (const auto &name : x.v) {
-    auto *symbol{FindSymbol(name)};
-    if (!ConvertToProcEntity(*symbol)) {
+    auto &symbol{DEREF(FindSymbol(name))};
+    if (!ConvertToProcEntity(symbol)) {
       SayWithDecl(
-          name, *symbol, "INTRINSIC attribute not allowed on '%s'"_err_en_US);
-    } else if (symbol->attrs().test(Attr::EXTERNAL)) { // C840
-      Say(symbol->name(),
+          name, symbol, "INTRINSIC attribute not allowed on '%s'"_err_en_US);
+    } else if (symbol.attrs().test(Attr::EXTERNAL)) { // C840
+      Say(symbol.name(),
           "Symbol '%s' cannot have both EXTERNAL and INTRINSIC attributes"_err_en_US,
-          symbol->name());
+          symbol.name());
+    } else if (symbol.GetType()) {
+      // These warnings are worded so that they should make sense in either
+      // order.
+      Say(symbol.name(),
+          "Explicit type declaration ignored for intrinsic function '%s'"_en_US,
+          symbol.name())
+          .Attach(name.source,
+              "INTRINSIC statement for explicitly-typed '%s'"_en_US,
+              name.source);
     }
   }
   return false;
@@ -4422,7 +4459,7 @@ bool DeclarationVisitor::Pre(const parser::CommonBlockObject &) {
 void DeclarationVisitor::Post(const parser::CommonBlockObject &x) {
   const auto &name{std::get<parser::Name>(x.t)};
   DeclareObjectEntity(name);
-  auto pair{commonBlockObjects_.insert(name.source)};
+  auto pair{specPartState_.commonBlockObjects.insert(name.source)};
   if (!pair.second) {
     const SourceName &prev{*pair.first};
     Say2(name.source, "'%s' is already in a COMMON block"_err_en_US, prev,
@@ -4434,7 +4471,7 @@ bool DeclarationVisitor::Pre(const parser::EquivalenceStmt &x) {
   // save equivalence sets to be processed after specification part
   if (CheckNotInBlock("EQUIVALENCE")) { // C1107
     for (const std::list<parser::EquivalenceObject> &set : x.v) {
-      equivalenceSets_.push_back(&set);
+      specPartState_.equivalenceSets.push_back(&set);
     }
   }
   return false; // don't implicitly declare names yet
@@ -4443,7 +4480,7 @@ bool DeclarationVisitor::Pre(const parser::EquivalenceStmt &x) {
 void DeclarationVisitor::CheckEquivalenceSets() {
   EquivalenceSets equivSets{context()};
   inEquivalenceStmt_ = true;
-  for (const auto *set : equivalenceSets_) {
+  for (const auto *set : specPartState_.equivalenceSets) {
     const auto &source{set->front().v.value().source};
     if (set->size() <= 1) { // R871
       Say(source, "Equivalence set must have more than one object"_err_en_US);
@@ -4465,12 +4502,12 @@ void DeclarationVisitor::CheckEquivalenceSets() {
       currScope().add_equivalenceSet(std::move(set));
     }
   }
-  equivalenceSets_.clear();
+  specPartState_.equivalenceSets.clear();
 }
 
 bool DeclarationVisitor::Pre(const parser::SaveStmt &x) {
   if (x.v.empty()) {
-    saveInfo_.saveAll = currStmtSource();
+    specPartState_.saveInfo.saveAll = currStmtSource();
     currScope().set_hasSAVE();
   } else {
     for (const parser::SavedEntity &y : x.v) {
@@ -4478,7 +4515,7 @@ bool DeclarationVisitor::Pre(const parser::SaveStmt &x) {
       const auto &name{std::get<parser::Name>(y.t)};
       if (kind == parser::SavedEntity::Kind::Common) {
         MakeCommonBlockSymbol(name);
-        AddSaveName(saveInfo_.commons, name.source);
+        AddSaveName(specPartState_.saveInfo.commons, name.source);
       } else {
         HandleAttributeStmt(Attr::SAVE, name);
       }
@@ -4488,15 +4525,15 @@ bool DeclarationVisitor::Pre(const parser::SaveStmt &x) {
 }
 
 void DeclarationVisitor::CheckSaveStmts() {
-  for (const SourceName &name : saveInfo_.entities) {
+  for (const SourceName &name : specPartState_.saveInfo.entities) {
     auto *symbol{FindInScope(name)};
     if (!symbol) {
       // error was reported
-    } else if (saveInfo_.saveAll) {
+    } else if (specPartState_.saveInfo.saveAll) {
       // C889 - note that pgi, ifort, xlf do not enforce this constraint
       Say2(name,
           "Explicit SAVE of '%s' is redundant due to global SAVE statement"_err_en_US,
-          *saveInfo_.saveAll, "Global SAVE statement"_en_US);
+          *specPartState_.saveInfo.saveAll, "Global SAVE statement"_en_US);
     } else if (auto msg{CheckSaveAttr(*symbol)}) {
       Say(name, std::move(*msg));
       context().SetError(*symbol);
@@ -4504,7 +4541,7 @@ void DeclarationVisitor::CheckSaveStmts() {
       SetSaveAttr(*symbol);
     }
   }
-  for (const SourceName &name : saveInfo_.commons) {
+  for (const SourceName &name : specPartState_.saveInfo.commons) {
     if (auto *symbol{currScope().FindCommonBlock(name)}) {
       auto &objects{symbol->get<CommonBlockDetails>().objects()};
       if (objects.empty()) {
@@ -4524,7 +4561,7 @@ void DeclarationVisitor::CheckSaveStmts() {
       }
     }
   }
-  if (saveInfo_.saveAll) {
+  if (specPartState_.saveInfo.saveAll) {
     // Apply SAVE attribute to applicable symbols
     for (auto pair : currScope()) {
       auto &symbol{*pair.second};
@@ -4533,7 +4570,7 @@ void DeclarationVisitor::CheckSaveStmts() {
       }
     }
   }
-  saveInfo_ = {};
+  specPartState_.saveInfo = {};
 }
 
 // If SAVE attribute can't be set on symbol, return error message.
@@ -4553,10 +4590,10 @@ std::optional<MessageFixedText> DeclarationVisitor::CheckSaveAttr(
   }
 }
 
-// Record SAVEd names in saveInfo_.entities.
+// Record SAVEd names in specPartState_.saveInfo.entities.
 Attrs DeclarationVisitor::HandleSaveName(const SourceName &name, Attrs attrs) {
   if (attrs.test(Attr::SAVE)) {
-    AddSaveName(saveInfo_.entities, name);
+    AddSaveName(specPartState_.saveInfo.entities, name);
   }
   return attrs;
 }
@@ -4591,7 +4628,7 @@ void DeclarationVisitor::CheckCommonBlocks() {
     }
   }
   // check objects in common blocks
-  for (const auto &name : commonBlockObjects_) {
+  for (const auto &name : specPartState_.commonBlockObjects) {
     const auto *symbol{currScope().FindSymbol(name)};
     if (!symbol) {
       continue;
@@ -4625,7 +4662,7 @@ void DeclarationVisitor::CheckCommonBlocks() {
       }
     }
   }
-  commonBlockObjects_ = {};
+  specPartState_.commonBlockObjects = {};
 }
 
 Symbol &DeclarationVisitor::MakeCommonBlockSymbol(const parser::Name &name) {
@@ -4683,10 +4720,14 @@ bool DeclarationVisitor::HandleUnrestrictedSpecificIntrinsicFunction(
     // are acceptable as procedure interfaces.
     Symbol &symbol{
         MakeSymbol(InclusiveScope(), name.source, Attrs{Attr::INTRINSIC})};
+    symbol.set_details(ProcEntityDetails{});
+    symbol.set(Symbol::Flag::Function);
     if (interface->IsElemental()) {
       symbol.attrs().set(Attr::ELEMENTAL);
     }
-    symbol.set_details(ProcEntityDetails{});
+    if (interface->IsPure()) {
+      symbol.attrs().set(Attr::PURE);
+    }
     Resolve(name, symbol);
     return true;
   } else {
@@ -5962,9 +6003,7 @@ void ResolveNamesVisitor::HandleProcedureName(
     bool convertedToProcEntity{ConvertToProcEntity(*symbol)};
     if (convertedToProcEntity && !symbol->attrs().test(Attr::EXTERNAL) &&
         IsIntrinsic(symbol->name(), flag) && !IsDummy(*symbol)) {
-      symbol->attrs().set(Attr::INTRINSIC);
-      // 8.2(3): ignore type from intrinsic in type-declaration-stmt
-      symbol->get<ProcEntityDetails>().set_interface(ProcInterface{});
+      AcquireIntrinsicProcedureFlags(*symbol);
     }
     if (!SetProcFlag(name, *symbol, flag)) {
       return; // reported error
@@ -6049,9 +6088,14 @@ bool ResolveNamesVisitor::SetProcFlag(
     if (flag == Symbol::Flag::Function) {
       ApplyImplicitRules(symbol);
     }
+    if (symbol.attrs().test(Attr::INTRINSIC)) {
+      AcquireIntrinsicProcedureFlags(symbol);
+    }
   } else if (symbol.GetType() && flag == Symbol::Flag::Subroutine) {
     SayWithDecl(
         name, symbol, "Cannot call function '%s' like a subroutine"_err_en_US);
+  } else if (symbol.attrs().test(Attr::INTRINSIC)) {
+    AcquireIntrinsicProcedureFlags(symbol);
   }
   return true;
 }
@@ -6136,14 +6180,14 @@ bool ResolveNamesVisitor::Pre(const parser::SpecificationPart &x) {
   const auto &[accDecls, ompDecls, compilerDirectives, useStmts, importStmts,
       implicitPart, decls] = x.t;
   auto flagRestorer{common::ScopedSet(inSpecificationPart_, true)};
+  auto stateRestorer{
+      common::ScopedSet(specPartState_, SpecificationPartState{})};
   Walk(accDecls);
   Walk(ompDecls);
   Walk(compilerDirectives);
   Walk(useStmts);
   Walk(importStmts);
   Walk(implicitPart);
-  auto setRestorer{
-      common::ScopedSet(specPartForwardRefs_, std::set<SourceName>{})};
   for (const auto &decl : decls) {
     if (const auto *spec{
             std::get_if<parser::SpecificationConstruct>(&decl.u)}) {

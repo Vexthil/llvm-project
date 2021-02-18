@@ -2751,8 +2751,9 @@ ASTReader::ReadControlBlock(ModuleFile &F,
 
       bool hasErrors = Record[6];
       if (hasErrors && !DisableValidation) {
-        // Always rebuild modules from the cache on an error
-        if (F.Kind == MK_ImplicitModule)
+        // If requested by the caller, mark modules on error as out-of-date.
+        if (F.Kind == MK_ImplicitModule &&
+            (ClientLoadCapabilities & ARR_TreatModuleWithErrorsAsOutOfDate))
           return OutOfDate;
 
         if (!AllowASTWithCompilerErrors) {
@@ -7068,6 +7069,11 @@ QualType ASTReader::GetType(TypeID ID) {
       T = Context.Id##Ty; \
       break;
 #include "clang/Basic/PPCTypes.def"
+#define RVV_TYPE(Name, Id, SingletonId) \
+    case PREDEF_TYPE_##Id##_ID: \
+      T = Context.SingletonId; \
+      break;
+#include "clang/Basic/RISCVVTypes.def"
     }
 
     assert(!T.isNull() && "Unknown predefined type");
@@ -11729,6 +11735,11 @@ OMPClause *OMPClauseReader::readClause() {
   case llvm::omp::OMPC_simdlen:
     C = new (Context) OMPSimdlenClause();
     break;
+  case llvm::omp::OMPC_sizes: {
+    unsigned NumSizes = Record.readInt();
+    C = OMPSizesClause::CreateEmpty(Context, NumSizes);
+    break;
+  }
   case llvm::omp::OMPC_allocator:
     C = new (Context) OMPAllocatorClause();
     break;
@@ -12017,6 +12028,12 @@ void OMPClauseReader::VisitOMPSafelenClause(OMPSafelenClause *C) {
 
 void OMPClauseReader::VisitOMPSimdlenClause(OMPSimdlenClause *C) {
   C->setSimdlen(Record.readSubExpr());
+  C->setLParenLoc(Record.readSourceLocation());
+}
+
+void OMPClauseReader::VisitOMPSizesClause(OMPSizesClause *C) {
+  for (Expr *&E : C->getSizesRefs())
+    E = Record.readSubExpr();
   C->setLParenLoc(Record.readSourceLocation());
 }
 
