@@ -266,74 +266,22 @@ struct PR24718_2 {
   };
 };
 
-// MyTuple and std code is copied from live-bindings-test.cpp
-
-//#define USE_STD
-
-#ifndef USE_STD
-// Machinery required for custom structured bindings decomposition.
-typedef unsigned long size_t;
-
-namespace std {
-template <class T> class tuple_size;
-template <class T>
-constexpr size_t tuple_size_v = tuple_size<T>::value;
-template <size_t I, class T> class tuple_element;
-
-template <class T, T v>
-struct integral_constant {
-  static constexpr T value = v;
-  typedef T value_type;
-  typedef integral_constant type;
-  constexpr operator value_type() const noexcept { return value; }
-};
-} // namespace std
-
-struct MyTuple {
-  int a;
-  int b;
-
-  template <size_t N>
-  int get() const {
-    if constexpr (N == 0)
-      return a;
-    else if constexpr (N == 1)
-      return b;
-  }
-};
-
-namespace std {
-template <>
-struct tuple_size<MyTuple>
-    : std::integral_constant<size_t, 2> {};
-
-template <size_t N>
-struct tuple_element<N, MyTuple> {
-  using type = int;
-};
-} // namespace std
-
-MyTuple getMyTuple();
-#else
-
-#include <tuple>
-std::tuple<int, int> getMyTuple();
-#endif
-
-
 namespace structured_binding_tests {
 int x; // expected-note {{previous declaration is here}}
 int y; // expected-note {{previous declaration is here}}
+struct S {
+  int a, b;
+};
 
 void test1() {
-  const auto [x, y] = getMyTuple(); // expected-warning 2 {{declaration shadows a variable in namespace 'structured_binding_tests'}}
+  const auto [x, y] = S(); // expected-warning 2 {{declaration shadows a variable in namespace 'structured_binding_tests'}}
 }
 
 void test2() {
   int a; // expected-note {{previous declaration is here}}
   bool b; // expected-note {{previous declaration is here}}
   {
-    auto [a, b] = getMyTuple(); // expected-warning 2 {{declaration shadows a local variable}}
+    auto [a, b] = S(); // expected-warning 2 {{declaration shadows a local variable}}
   }
 }
 
@@ -343,7 +291,7 @@ class A
   int m_b; // expected-note {{previous declaration is here}}
 
   void test3() {
-    auto [m_a, m_b] = getMyTuple(); // expected-warning 2 {{declaration shadows a field of 'structured_binding_tests::A'}}
+    auto [m_a, m_b] = S(); // expected-warning 2 {{declaration shadows a field of 'structured_binding_tests::A'}}
   }
 };
 

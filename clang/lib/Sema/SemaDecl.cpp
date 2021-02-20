@@ -7540,7 +7540,7 @@ NamedDecl *Sema::getShadowedDeclaration(const VarDecl *D,
     return nullptr;
 
   NamedDecl *ShadowedDecl = R.getFoundDecl();
-  return isa<VarDecl>(ShadowedDecl) || isa<FieldDecl>(ShadowedDecl)
+  return isa<VarDecl, FieldDecl, BindingDecl>(ShadowedDecl)
              ? ShadowedDecl
              : nullptr;
 }
@@ -7568,7 +7568,7 @@ NamedDecl *Sema::getShadowedDeclaration(const BindingDecl *D,
     return nullptr;
 
   NamedDecl *ShadowedDecl = R.getFoundDecl();
-  return isa<VarDecl>(ShadowedDecl) || isa<FieldDecl>(ShadowedDecl)
+  return isa<VarDecl, FieldDecl, BindingDecl>(ShadowedDecl)
              ? ShadowedDecl
              : nullptr;
 }
