@@ -130,7 +130,7 @@ public:
     }
       _LIBCPP_FALLTHROUGH();
     case PS_InRootName: {
-      PosPtr TkEnd = consumeSeparator(Start, End);
+      PosPtr TkEnd = consumeAllSeparators(Start, End);
       if (TkEnd)
         return makeState(PS_InRootDir, Start, TkEnd);
       else
@@ -140,7 +140,7 @@ public:
       return makeState(PS_InFilenames, Start, consumeName(Start, End));
 
     case PS_InFilenames: {
-      PosPtr SepEnd = consumeSeparator(Start, End);
+      PosPtr SepEnd = consumeAllSeparators(Start, End);
       if (SepEnd != End) {
         PosPtr TkEnd = consumeName(SepEnd, End);
         if (TkEnd)
@@ -166,7 +166,7 @@ public:
     switch (State) {
     case PS_AtEnd: {
       // Try to consume a trailing separator or root directory first.
-      if (PosPtr SepEnd = consumeSeparator(RStart, REnd)) {
+      if (PosPtr SepEnd = consumeAllSeparators(RStart, REnd)) {
         if (SepEnd == REnd)
           return makeState(PS_InRootDir, Path.data(), RStart + 1);
         PosPtr TkStart = consumeRootName(SepEnd, REnd);
@@ -185,7 +185,7 @@ public:
       return makeState(PS_InFilenames, consumeName(RStart, REnd) + 1,
                        RStart + 1);
     case PS_InFilenames: {
-      PosPtr SepEnd = consumeSeparator(RStart, REnd);
+      PosPtr SepEnd = consumeAllSeparators(RStart, REnd);
       if (SepEnd == REnd)
         return makeState(PS_InRootDir, Path.data(), RStart + 1);
       PosPtr TkStart = consumeRootName(SepEnd ? SepEnd : RStart, REnd);
@@ -304,7 +304,8 @@ private:
     _LIBCPP_UNREACHABLE();
   }
 
-  PosPtr consumeSeparator(PosPtr P, PosPtr End) const noexcept {
+  // Consume all consecutive separators.
+  PosPtr consumeAllSeparators(PosPtr P, PosPtr End) const noexcept {
     if (P == nullptr || P == End || !isSeparator(*P))
       return nullptr;
     const int Inc = P < End ? 1 : -1;
@@ -316,7 +317,7 @@ private:
 
   // Consume exactly N separators, or return nullptr.
   PosPtr consumeNSeparators(PosPtr P, PosPtr End, int N) const noexcept {
-    PosPtr Ret = consumeSeparator(P, End);
+    PosPtr Ret = consumeAllSeparators(P, End);
     if (Ret == nullptr)
       return nullptr;
     if (P < End) {
@@ -1051,7 +1052,7 @@ bool __create_directory(path const& p, path const& attributes, error_code* ec) {
 
   StatT attr_stat;
   error_code mec;
-  auto st = detail::posix_stat(attributes, attr_stat, &mec);
+  file_status st = detail::posix_stat(attributes, attr_stat, &mec);
   if (!status_known(st))
     return err.report(mec);
   if (!is_directory(st))
@@ -1061,16 +1062,14 @@ bool __create_directory(path const& p, path const& attributes, error_code* ec) {
   if (detail::mkdir(p.c_str(), attr_stat.st_mode) == 0)
     return true;
 
-  if (errno == EEXIST) {
-    error_code mec = capture_errno();
-    error_code ignored_ec;
-    const file_status st = status(p, ignored_ec);
-    if (!is_directory(st)) {
-      err.report(mec);
-    }
-  } else {
-    err.report(capture_errno());
-  }
+  if (errno != EEXIST)
+    return err.report(capture_errno());
+
+  mec = capture_errno();
+  error_code ignored_ec;
+  st = status(p, ignored_ec);
+  if (!is_directory(st))
+    return err.report(mec);
   return false;
 }
 
@@ -1719,6 +1718,7 @@ path path::lexically_normal() const {
   if (NeedTrailingSep)
     Result /= PS("");
 
+  Result.make_preferred();
   return Result;
 }
 
