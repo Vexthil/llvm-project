@@ -295,4 +295,14 @@ class A
   }
 };
 
+void test4() {
+  const auto [a, b] = S(); // expected-note 3 {{previous declaration is here}}
+  {
+    int a = 4; // expected-warning {{declaration shadows a structured binding}}
+  }
+  {
+    const auto [a, b] = S(); // expected-warning 2 {{declaration shadows a structured binding}}
+  }
+}
+
 }; // namespace structured_binding_tests
